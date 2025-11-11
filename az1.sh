@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "=== 批量替换所有 VM 的 Standard SKU 公网 IP 为 Basic 动态 IP（若无则自动创建） ==="
+echo "=== 批量替换所有 VM 的 Standard SKU 公网 IP 为 Basic 动态 IP（若不支持则自动切换为 Standard Static） ==="
 
 # 日志文件
 LOG_FILE="az_replace_ip_$(date +%F_%H-%M).log"
@@ -18,6 +18,26 @@ if [[ -z "$VMS" ]]; then
     echo "未找到任何虚拟机！"
     exit 1
 fi
+
+# 创建公网 IP 的函数（自动降级逻辑）
+create_public_ip() {
+    local RG="$1"
+    local NEW_PIP_NAME="$2"
+
+    echo "✨ 尝试创建 Basic 动态公网 IP：$NEW_PIP_NAME"
+    if ! az network public-ip create \
+        -g "$RG" \
+        -n "$NEW_PIP_NAME" \
+        --sku Basic \
+        --allocation-method Dynamic &>/dev/null; then
+        echo "⚠️ 无法创建 Basic IP（区域或订阅不支持），自动切换为 Standard Static..."
+        az network public-ip create \
+            -g "$RG" \
+            -n "$NEW_PIP_NAME" \
+            --sku Standard \
+            --allocation-method Static >/dev/null
+    fi
+}
 
 # 存储需重启的 VM 列表
 RESTART_LIST=()
@@ -44,16 +64,12 @@ while read -r VM_NAME RG; do
     # 获取公网 IP 信息
     PIP_ID=$(az network nic show -g "$RG" -n "$NIC_NAME" --query "ipConfigurations[0].publicIPAddress.id" -o tsv)
 
-    # 无公网 IP → 自动创建并绑定新的 Basic 动态 IP
+    # 无公网 IP → 自动创建并绑定新的 IP
     if [[ -z "$PIP_ID" ]]; then
-        echo "🌐 $VM_NAME 当前无公网 IP，自动创建 Basic 动态公网 IP..."
+        echo "🌐 $VM_NAME 当前无公网 IP，自动创建新的 IP..."
 
         NEW_PIP_NAME="${NIC_NAME}-pip-$RANDOM"
-        az network public-ip create \
-            -g "$RG" \
-            -n "$NEW_PIP_NAME" \
-            --sku Basic \
-            --allocation-method Dynamic
+        create_public_ip "$RG" "$NEW_PIP_NAME"
 
         az network nic ip-config update \
             -g "$RG" \
@@ -62,7 +78,7 @@ while read -r VM_NAME RG; do
             --public-ip-address "$NEW_PIP_NAME"
 
         NEW_IP=$(az network public-ip show -g "$RG" -n "$NEW_PIP_NAME" --query "ipAddress" -o tsv)
-        echo "✅ 已为 $VM_NAME 创建并绑定新公网 IP：$NEW_IP"
+        echo "✅ 已为 $VM_NAME 创建并绑定公网 IP：$NEW_IP"
         RESTART_LIST+=("$VM_NAME|$RG")
         continue
     fi
@@ -91,14 +107,9 @@ while read -r VM_NAME RG; do
         az network public-ip delete -g "$RG" -n "$PIP_NAME" || true
     fi
 
-    # 创建新的 Basic 动态 IP
+    # 创建新的 IP（带自动降级逻辑）
     NEW_PIP_NAME="${NIC_NAME}-pip-$RANDOM"
-    echo "✨ 创建新的 Basic 动态公网 IP：$NEW_PIP_NAME"
-    az network public-ip create \
-        -g "$RG" \
-        -n "$NEW_PIP_NAME" \
-        --sku Basic \
-        --allocation-method Dynamic
+    create_public_ip "$RG" "$NEW_PIP_NAME"
 
     # 绑定新 IP
     echo "🔗 绑定新的公网 IP..."
@@ -118,7 +129,7 @@ echo "------------------------------------------------------------"
 echo "所有虚拟机公网 IP 处理完成 ✅"
 echo "开始统一重启虚拟机..."
 
-# 并行重启（提升速度）
+# 并行重启（加快速度）
 for VM in "${RESTART_LIST[@]}"; do
     VM_NAME="${VM%%|*}"
     RG="${VM##*|}"
