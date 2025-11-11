@@ -7,10 +7,6 @@ echo "=== 批量替换所有 VM 的 Standard SKU 公网 IP 为 Basic 动态 IP�
 LOG_FILE="az_replace_ip_$(date +%F_%H-%M).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-# 确认提示
-read -p "⚠️ 确认要修改当前订阅下所有虚拟机的公网 IP 吗？(yes/no): " confirm
-[[ "$confirm" == "yes" ]] || { echo "已取消操作"; exit 0; }
-
 # 获取当前订阅下所有 VM（名称 + 资源组）
 VMS=$(az vm list --query '[].{name:name,rg:resourceGroup}' -o tsv)
 
@@ -54,7 +50,7 @@ while read -r VM_NAME RG; do
     fi
     NIC_NAME=$(basename "$NIC_ID")
 
-    # 获取 IP 配置名称（避免硬编码 ipconfig1）
+    # 获取 IP 配置名称
     IPCONFIG_NAME=$(az network nic show -g "$RG" -n "$NIC_NAME" --query "ipConfigurations[0].name" -o tsv)
     if [[ -z "$IPCONFIG_NAME" ]]; then
         echo "⚠️ 未找到 IP 配置，跳过 $VM_NAME"
@@ -129,7 +125,7 @@ echo "------------------------------------------------------------"
 echo "所有虚拟机公网 IP 处理完成 ✅"
 echo "开始统一重启虚拟机..."
 
-# 并行重启（加快速度）
+# 并行重启
 for VM in "${RESTART_LIST[@]}"; do
     VM_NAME="${VM%%|*}"
     RG="${VM##*|}"
